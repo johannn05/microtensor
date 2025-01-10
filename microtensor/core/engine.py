@@ -1,11 +1,31 @@
 import numpy as np
 from typing import *
+from functools import partial  
+
 
 # constants
 DEFAULT_MIN = 1e-6
 DEFAULT_MAX = 1 - 1e-6
 
 Array = np.ndarray
+
+def _get_d(device: str):
+    """
+    Returns the appropriate device-specific backend or library.
+    
+    Args:
+        device (str): The device name ("cpu" or "gpu").
+        
+    Returns:
+        module: The backend library for the specified device.
+    """
+    if device == "cpu":
+        import numpy as np
+        return np
+    elif device == "gpu":
+        raise NotImplementedError("GPU support is not implemented.")
+    else:
+        raise ValueError(f"Unknown device: {device}")
 
 class no_grad:
     """
@@ -76,7 +96,11 @@ class Tensor:
         Reset the gradient to zero.
         """
         if self.requires_grad:
-            self.grad = np.zeros_like(self.data, dtype=self.dtype)
+            if self.grad is None:
+                self.grad = np.zeros_like(self.data, dtype=self.dtype)
+            else:
+                self.grad.fill(0)
+
 
     def set_requires_grad(self, val: bool) -> None:
         """
@@ -188,21 +212,24 @@ class Tensor:
         """
         Get a subset of the tensor using indices.
         """
-
         out = Tensor(
-            self.data[indices], dtype=self.dtype, 
-            _children=(self, ), _op="getitem", 
-            requires_grad=self.requires_grad, use_np=self.is_np_tensor
+            self.data[indices],  # Sliced data
+            dtype=self.dtype,
+            _children=(self,),
+            _op="getitem",
+            requires_grad=self.requires_grad
         )
 
         if self.requires_grad and self.grad_is_enabled:
             def _getitem_backward():
-                self.grad[indices] += out.grad
+                grad = np.zeros_like(self.data, dtype=self.dtype)
+                grad[indices] = out.grad
+                self.grad += grad
 
-            out._backward = _getitem_backward
-            out.set_requires_grad(True)
+            out.grad_fn = _getitem_backward
 
         return out
+
 
     # ----------------------- UNARY OPS --------------------------------
     def broadcast_to(self, target_shape: Tuple[int]) -> "Tensor":
@@ -254,16 +281,23 @@ class Tensor:
 
     def sum(self, axis: Union[int, Tuple[int]] = None, keepdims: bool = False) -> "Tensor":
         """
-        sum values of the tensor along specified axes.
+        Sum values of the tensor along specified axes.
 
         Args:
             axis (int or Tuple[int], optional): The axes along which to sum.
             keepdims (bool, optional): Whether to retain reduced dimensions.
+
         Returns:
             Tensor: A new tensor with summed values.
         """
         summed_data = np.sum(self.data, axis=axis, keepdims=keepdims)
-        out = Tensor(summed_data, dtype=self.dtype, _children=(self,), _op="sum")
+        out = Tensor(
+            summed_data,
+            dtype=self.dtype,
+            _children=(self,),
+            _op="sum",
+            requires_grad=self.requires_grad  # Propagate requires_grad
+        )
 
         if self.requires_grad and self.grad_is_enabled:
             def _sum_backward():
@@ -273,6 +307,7 @@ class Tensor:
             out.grad_fn = _sum_backward
 
         return out
+
 
     
     def mean(self, axis: Union[int, Tuple[int]] = None, keepdims: bool = False) -> "Tensor":
@@ -333,9 +368,13 @@ class Tensor:
         return out
 
 
-    def T(self, axes: Iterable[int] = None) -> "Tensor":
+    def T(self, axes: Optional[Iterable[int]] = None) -> "Tensor":
         """
-        transpose the tensor along specified axes.
+        Transpose the tensor along specified axes.
+
+        Args:
+            axes (Optional[Iterable[int]]): Axes to transpose the tensor. If None, reverses all axes.
+
         Returns:
             Tensor: A new tensor with transposed data.
         """
@@ -349,6 +388,7 @@ class Tensor:
             out.grad_fn = _transpose_backward
 
         return out
+
 
     
     def exp(self) -> "Tensor":
@@ -390,8 +430,11 @@ class Tensor:
     
     def reshape(self, *shape: int) -> "Tensor":
         """
-        reshape the tensor to the specified shape.
+        Reshape the tensor to the specified shape.
         """
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]  # Unpack if a single tuple or list is passed
+        
         reshaped_data = self.data.reshape(shape)
         out = Tensor(reshaped_data, dtype=self.dtype, _children=(self,), _op="reshape")
 
@@ -402,6 +445,7 @@ class Tensor:
             out.grad_fn = _reshape_backward
 
         return out
+
 
 
     def masked_fill(self, mask: Union[np.ndarray, list], value: Any) -> "Tensor":
