@@ -163,6 +163,11 @@ class Tensor:
         # Gradient of the current tensor with respect to itself is always 1
         self.grad = np.ones_like(self.data, dtype=self.dtype)
 
+        # Initialize gradients for all tensors in the graph
+        for tensor in topo_order:
+            if tensor.requires_grad and tensor.grad is None:
+                tensor.grad = np.zeros_like(tensor.data, dtype=tensor.dtype)
+
         # Traverse the graph in reverse topological order
         for tensor in reversed(topo_order):
             if tensor.grad_fn is not None:
@@ -759,4 +764,3 @@ class Tensor:
         Return a string representation of the tensor.
         """
         return f"Tensor(data={self.data}, requires_grad={self.requires_grad})"
-
